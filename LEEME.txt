@@ -1,0 +1,134 @@
+ETIQUETADOR DE COLORES
+======================
+
+QUE HACE
+--------
+Le das un listado de productos con la URL de la foto de cada uno, y te
+devuelve el mismo listado en Excel con el color de cada producto.
+
+No usa OpenAI ni ninguna clave de API. Todo se calcula en tu ordenador,
+mirando los pixeles de cada foto. Coste cero.
+
+
+COMO SE USA
+-----------
+La forma mas facil:
+
+    ARRASTRA el fichero del listado (.csv o .xlsx) encima del icono
+    "ETIQUETAR COLORES.bat" y sueltalo.
+
+Se abre una ventana negra, va diciendo por donde va, y al terminar te
+dice donde ha dejado el Excel. Puedes arrastrar varios listados a la vez.
+
+Si prefieres, haz DOBLE CLIC en "ETIQUETAR COLORES.bat" y se abrira una
+ventana para que elijas el fichero.
+
+
+DONDE APARECE EL RESULTADO
+--------------------------
+Justo al lado del fichero que le diste, con el mismo nombre y anadiendo
+" CON COLOR.xlsx". Por ejemplo:
+
+    mis_productos.csv   ->   mis_productos CON COLOR.xlsx
+
+
+QUE COLUMNAS ANADE
+------------------
+    Color      el color en ingles: Black, Navy blue, Camel, Beige...
+    Familia    el grupo: black, blue, brown, beige... (para filtrar)
+    Confianza  de 0 a 1: que parte del producto es de ese color
+    Revisar    SI o NO
+    Motivo     por que lo marca para revisar
+    RGB        el color exacto medido, tipo #3A2B1C
+
+
+LO PRIMERO QUE DEBES HACER AL ABRIR EL EXCEL
+--------------------------------------------
+Filtra la columna "Revisar" por "SI". Esas son las unicas filas que
+merece la pena mirar a ojo (suelen ser entre el 8% y el 17%). El resto
+puedes darlas por buenas.
+
+"Revisar = SI" no quiere decir que este mal. Quiere decir que hay algo en
+la foto que baja la certeza: un estampado, un producto muy pequeno, dos
+colores repartidos, o una joya finita.
+
+
+CUANTO TARDA
+------------
+La primera vez tiene que descargar todas las fotos: unos 3 minutos y
+medio por cada 1000 productos. Las fotos se quedan guardadas en la
+carpeta "cache_imagenes", asi que si vuelves a lanzar el mismo listado
+tarda unos segundos.
+
+Puedes borrar la carpeta "cache_imagenes" cuando quieras para liberar
+espacio. Solo significa que la proxima vez volvera a descargar.
+
+
+SI LO PARAS A MEDIAS
+--------------------
+No pasa nada. Vuelve a lanzarlo y sigue donde lo dejo: no repite lo que
+ya tenia resuelto.
+
+
+LO QUE ESTO ACIERTA Y LO QUE NO
+-------------------------------
+Medido sobre 237 fotos de dos proveedores:
+
+    acierta el color exacto ................ 81 de cada 100
+    acierta el color o uno muy parecido .... 97 de cada 100
+    se equivoca claramente .................  3 de cada 100
+
+Lo que NO sabe hacer, y no tiene arreglo:
+
+  * DORADOS Y PLATEADOS. Un bolso dorado sale como "beige" o "crema".
+    En una foto el oro y el crema son el mismo color; lo unico que los
+    distingue es el brillo, y se comprobo que medir el brillo no sirve.
+    TRUCO: busca en la columna de referencia las palabras ORO, GOLD,
+    SILVER o METALLIC y revisa esas a mano.
+
+  * VAQUEROS MUY DESTENIDOS. Pueden salir como gris en vez de azul.
+
+  * FOTOS CON DOS PRENDAS (un abrigo puesto sobre unos vaqueros). Mide
+    el color que mas ocupa, y no sabe cual de las dos es el producto.
+
+  * ROSA PALO frente a BEIGE. Son casi el mismo color y a veces se
+    equivoca.
+
+  * COSAS QUE NO SON ROPA (boligrafos, perfumes) van peor.
+
+
+SI ALGO FALLA
+-------------
+La ventana negra te dira que ha pasado, en castellano. Los casos
+normales son:
+
+  "No existe el fichero"
+      La ruta esta mal o has movido el fichero.
+
+  "No encuentro ninguna columna con enlaces a las fotos"
+      El listado que te han mandado no trae las URLs de las imagenes.
+      Pidelo otra vez con la columna de la foto incluida.
+
+  "el fichero esta abierto"
+      Tienes el Excel de salida abierto. Cierralo y vuelve a lanzarlo.
+
+  "ERROR_DESCARGA" en algunas filas
+      Esas URLs dan error 404 en el servidor del proveedor. No es cosa
+      del programa; esas fotos no existen.
+
+  "No encuentro Python en este ordenador"
+      Instalalo desde python.org y marca "Add Python to PATH".
+
+
+FICHEROS DE ESTA CARPETA
+------------------------
+  ETIQUETAR COLORES.bat        <- lo que usas tu
+  etiquetar_colores_local.py   <- el programa
+  cache_imagenes\              <- fotos descargadas (se puede borrar)
+  LEEME.txt                    <- esto
+
+  etiquetador_colores.py       <- el script VIEJO que usaba OpenAI.
+                                  Ya no se usa. IMPORTANTE: contiene una
+                                  clave de API de OpenAI en texto plano
+                                  en la linea 10. Conviene revocarla en
+                                  el panel de OpenAI y borrar el fichero.
