@@ -16,3 +16,4 @@ dist/
 # Copias de seguridad antiguas (Git ya guarda el historial)
 *.bak*
 *_BACKUP_*
+.pytest_cache/

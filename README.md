@@ -2,7 +2,7 @@
 
 Herramienta para catálogos de moda: le das un listado de productos con la URL
 de la foto de cada uno y te devuelve el mismo listado en Excel con el **color
-de cada producto**, listo para filtrar o para cargarlo en la base de datos.
+de cada producto**, listo para filtrar o para cargarlo en una base de datos.
 
 Todo se calcula en tu ordenador mirando los píxeles de cada foto. **No usa
 servicios de IA de pago ni claves de API**: coste cero y nada que se pueda
@@ -38,7 +38,7 @@ beige con marrón, gris con negro, rosa con morado.
 
 Solo hace falta revisar a mano las filas con `Revisar = SI` (normalmente entre
 el 8 % y el 17 %). Opcionalmente, también genera las sentencias SQL `UPDATE`
-listas para cargar los colores en la base de datos.
+listas para cargar los colores en una base de datos.
 
 ## Cómo funciona por dentro
 
@@ -74,7 +74,11 @@ Opciones:
 | `-s`, `--salida` | Nombre del Excel de salida (si procesas un solo listado) |
 | `-w`, `--hilos` | Descargas en paralelo (por defecto 8) |
 | `--sql` | Genera también las sentencias SQL (ver abajo) |
-| `-t`, `--tabla` | Tabla para las sentencias SQL (por defecto, la variable de entorno `ETIQUETADOR_TABLA` o `productos`) |
+| `-t`, `--tabla` | Tabla para las sentencias SQL |
+| `--col-color`, `--col-proveedor`, `--col-referencia` | Columnas de tu base de datos para las sentencias SQL |
+| `--columna-proveedor` | Cómo se llama la columna del proveedor **en el listado**, si no es `SUPPLIER`, `PROVEEDOR`… |
+| `--cache` | Carpeta donde guardar las fotos descargadas |
+| `--web`, `--max-filas`, `--progreso` | Para usarlo desde un servidor web (ver abajo) |
 
 ### Sentencias SQL (opcional)
 
@@ -90,15 +94,44 @@ python etiquetar_colores_local.py mis_productos.csv --sql
 update productos set color = 'Navy blue' where proveedor_id = 7 and referencia = 'AB123';
 ```
 
-Los nombres de la tabla y de las columnas se adaptan a tu base de datos con
-variables de entorno:
+Los nombres de la tabla y de las columnas se adaptan a tu base de datos, al
+lanzarlo o con variables de entorno (para no escribirlos cada vez):
 
-| Variable | Por defecto |
-|---|---|
-| `ETIQUETADOR_TABLA` | `productos` |
-| `ETIQUETADOR_COL_COLOR` | `color` |
-| `ETIQUETADOR_COL_PROVEEDOR` | `proveedor_id` |
-| `ETIQUETADOR_COL_REFERENCIA` | `referencia` |
+| Opción | Variable de entorno | Por defecto |
+|---|---|---|
+| `--tabla` | `ETIQUETADOR_TABLA` | `productos` |
+| `--col-color` | `ETIQUETADOR_COL_COLOR` | `color` |
+| `--col-proveedor` | `ETIQUETADOR_COL_PROVEEDOR` | `proveedor_id` |
+| `--col-referencia` | `ETIQUETADOR_COL_REFERENCIA` | `referencia` |
+
+```bash
+python etiquetar_colores_local.py mis_productos.csv --sql --tabla articulos --col-color colour --columna-proveedor marca
+```
+
+Los nombres solo pueden llevar letras, números y `_`, para que no se pueda
+colar nada raro en las sentencias.
+
+### Modo web
+
+Con `--web` el programa se puede lanzar desde un servidor que procesa
+listados subidos por cualquiera:
+
+- **Bloquea las direcciones internas** (`127.0.0.1`, `192.168.x.x`,
+  `10.x.x.x`…), también si una web redirige a ellas, para que nadie use el
+  servidor para curiosear en su red privada (*SSRF*).
+- **Limita cada foto** a 5 MB, 20 megapíxeles y 10 segundos.
+- Solo acepta `.csv`. Con `--max-filas` se limita el tamaño del listado.
+- Con `--progreso fichero.json` va dejando cuántos productos lleva.
+
+Sea cual sea el modo, las celdas del listado que empiezan por `=` se
+guardan como texto en el Excel, para que no se ejecuten como fórmulas.
+
+### Pruebas
+
+```bash
+pip install pytest
+python -m pytest
+```
 
 Encuentra las columnas por su **contenido**, no por su nombre, así que da
 igual cómo vengan las cabeceras. Si lo paras a medias, al relanzarlo continúa

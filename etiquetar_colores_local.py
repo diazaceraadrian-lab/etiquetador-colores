@@ -102,12 +102,16 @@ El programa explica en castellano que ha pasado. Los casos tipicos:
 """
 
 import io
+import ipaddress
 import os
 import re
+import socket
 import sys
+import time
 
 import numpy as np
 import requests
+import urllib3.util.connection as urllib3_connection
 from PIL import Image
 from scipy import ndimage
 
@@ -283,15 +287,136 @@ def familia_de(nombre):
     return FAMILIA_DE.get(nombre, "desconocida")
 
 
-def descargar_imagen(url, timeout=20, intentos=2, lado=420):
+# ---------------------------------------------------------------
+# LIMITES DE DESCARGA
+# En el ordenador de uno mismo bastan unos limites amplios. Con --web se
+# endurecen, porque las URLs las escribe cualquiera que suba un listado.
+# ---------------------------------------------------------------
+LIMITES = {
+    "solo_publicas": False,           # bloquear direcciones internas (SSRF)
+    "max_bytes": 15 * 1024 * 1024,    # tamaño maximo de cada foto
+    "max_pixeles": 50_000_000,        # ancho x alto maximo de cada foto
+    "segundos": 30,                   # tiempo maximo para bajar una foto
+}
+LIMITES_WEB = {
+    "solo_publicas": True,
+    "max_bytes": 5 * 1024 * 1024,
+    "max_pixeles": 20_000_000,
+    "segundos": 10,
+}
+PUERTOS_WEB = (80, 443)   # en la web, solo los puertos normales de Internet
+
+
+class DescargaRechazada(Exception):
+    """La foto no se descarga por seguridad o por pasarse de un limite."""
+
+
+def ip_es_publica(ip):
+    """
+    True si la IP es una direccion de Internet normal.
+
+    Rechaza las internas: 127.0.0.1 (el propio servidor), 10.x, 172.16-31.x
+    y 192.168.x (redes de casa o de empresa), 169.254.x (de donde los
+    proveedores de hosting sirven datos privados de la maquina) y sus
+    equivalentes en IPv6. Una IPv6 que en realidad envuelve una IPv4
+    (::ffff:127.0.0.1) se mira por la IPv4 de dentro, que es el truco
+    tipico para colarse.
+    """
+    ip = ipaddress.ip_address(ip)
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+def _conexion_solo_publica(direccion, *args, **kwargs):
+    """
+    Sustituye a la funcion con la que la libreria de descarga abre cada
+    conexion. Se resuelve el nombre UNA vez, se comprueba la IP y se conecta
+    a esa misma IP. Si se comprobara el nombre por un lado y luego la
+    libreria lo resolviera otra vez por su cuenta, una web tramposa podria
+    responder con una IP publica la primera vez y con una interna la
+    segunda ("DNS rebinding").
+
+    Como TODAS las conexiones pasan por aqui, tambien quedan cubiertas las
+    redirecciones: si una web publica redirige a 127.0.0.1, se corta.
+    """
+    host, puerto = direccion
+    if puerto not in PUERTOS_WEB:
+        raise DescargaRechazada("puerto %s no permitido" % puerto)
+    try:
+        infos = socket.getaddrinfo(host, puerto, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise DescargaRechazada("no existe el dominio %s" % host)
+    for *_, sockaddr in infos:
+        if not ip_es_publica(sockaddr[0]):
+            raise DescargaRechazada("direccion interna bloqueada (%s)" % host)
+    return _crear_conexion_original((infos[0][4][0], puerto), *args, **kwargs)
+
+
+_crear_conexion_original = urllib3_connection.create_connection
+
+
+def configurar_limites(web):
+    """Activa (web=True) o desactiva los limites estrictos de la web."""
+    LIMITES.update(LIMITES_WEB if web else {
+        "solo_publicas": False, "max_bytes": 15 * 1024 * 1024,
+        "max_pixeles": 50_000_000, "segundos": 30})
+    urllib3_connection.create_connection = (
+        _conexion_solo_publica if web else _crear_conexion_original)
+
+
+def bajar_bytes(url):
+    """
+    Descarga una foto respetando LIMITES y devuelve sus bytes.
+
+    Se descarga a trozos ('stream') para poder cortar en cuanto se pasa del
+    tamaño maximo, en vez de bajar entera una foto de 2 GB y mirar luego.
+    """
+    if not url.startswith(("http://", "https://")):
+        raise DescargaRechazada("solo se aceptan enlaces http:// o https://")
+    with requests.Session() as s:
+        s.max_redirects = 3
+        # Con limites de web se ignoran los proxies del sistema: si no, la
+        # conexion iria al proxy y la comprobacion de IP miraria al proxy.
+        s.trust_env = not LIMITES["solo_publicas"]
+        inicio = time.time()
+        with s.get(url, timeout=(5, LIMITES["segundos"]), stream=True,
+                   headers={"User-Agent": "Mozilla/5.0"}) as r:
+            r.raise_for_status()
+            anunciado = r.headers.get("Content-Length")
+            if anunciado and anunciado.isdigit() \
+                    and int(anunciado) > LIMITES["max_bytes"]:
+                raise DescargaRechazada("la foto pesa demasiado")
+            trozos, total = [], 0
+            for trozo in r.iter_content(64 * 1024):
+                total += len(trozo)
+                if total > LIMITES["max_bytes"]:
+                    raise DescargaRechazada("la foto pesa demasiado")
+                if time.time() - inicio > LIMITES["segundos"]:
+                    raise DescargaRechazada("la foto tarda demasiado")
+                trozos.append(trozo)
+    return b"".join(trozos)
+
+
+def abrir_imagen(datos):
+    """
+    Abre la foto comprobando antes su tamaño en pixeles. Image.open solo lee
+    la cabecera, asi que se puede rechazar una "bomba" (una imagen pequeña
+    en bytes pero de 100.000 x 100.000 pixeles) antes de descomprimirla.
+    """
+    img = Image.open(io.BytesIO(datos))
+    ancho, alto = img.size
+    if ancho * alto > LIMITES["max_pixeles"]:
+        raise DescargaRechazada("la foto tiene demasiados pixeles")
+    return img
+
+
+def descargar_imagen(url, intentos=2, lado=420):
     """Descarga, aplana transparencias sobre blanco y reduce a 420 px."""
     ultimo = None
     for _ in range(intentos):
         try:
-            r = requests.get(url, timeout=timeout,
-                             headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            img = Image.open(io.BytesIO(r.content))
+            img = abrir_imagen(bajar_bytes(url))
             if img.mode in ("RGBA", "LA", "P"):
                 img = img.convert("RGBA")
                 fondo = Image.new("RGB", img.size, (255, 255, 255))
@@ -301,6 +426,8 @@ def descargar_imagen(url, timeout=20, intentos=2, lado=420):
                 img = img.convert("RGB")
             img.thumbnail((lado, lado), Image.LANCZOS)
             return img
+        except DescargaRechazada:
+            raise   # reintentar no cambiaria nada
         except Exception as e:
             ultimo = e
     raise ultimo
@@ -503,7 +630,7 @@ def detectar_color(img, k=4, max_pixeles=12000):
 # ===================================================================
 import argparse
 import hashlib
-import time
+import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
@@ -595,11 +722,22 @@ COLUMNAS_NUEVAS = ["Color", "Familia", "Confianza", "Revisar", "Motivo", "RGB"]
 #   setx ETIQUETADOR_COL_COLOR "columna_del_color"        (color)
 #   setx ETIQUETADOR_COL_PROVEEDOR "columna_proveedor"    (proveedor_id)
 #   setx ETIQUETADOR_COL_REFERENCIA "columna_referencia"  (referencia)
-# Tambien se puede pasar otra tabla al lanzarlo con  --tabla otra_tabla
+# O al lanzarlo:  --tabla, --col-color, --col-proveedor, --col-referencia
 TABLA_SQL = os.environ.get("ETIQUETADOR_TABLA", "productos")
 COLUMNA_SQL = os.environ.get("ETIQUETADOR_COL_COLOR", "color")
 COLUMNA_SQL_PROVEEDOR = os.environ.get("ETIQUETADOR_COL_PROVEEDOR", "proveedor_id")
 COLUMNA_SQL_REFERENCIA = os.environ.get("ETIQUETADOR_COL_REFERENCIA", "referencia")
+
+
+def nombre_sql_valido(nombre):
+    """
+    Un nombre de tabla o columna solo puede llevar letras, numeros y _ (y
+    un punto para 'base.tabla'). Asi nadie puede colar texto que convierta
+    la sentencia en otra cosa, p. ej. una tabla llamada
+    "productos; drop table productos".
+    """
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?",
+                             str(nombre)))
 
 
 def _sql_cadena(v):
@@ -647,8 +785,13 @@ def _parece_url(serie):
     return s.str.startswith(("http://", "https://")).mean()
 
 
-def leer_listado(ruta):
-    """Devuelve (tabla, columna_referencia, columna_url)."""
+def leer_listado(ruta, col_proveedor=None, solo_csv=False, max_filas=None):
+    """
+    Devuelve (tabla, columna_referencia, columna_url, columna_proveedor).
+
+    col_proveedor: nombre de la columna del proveedor si no es uno de los
+    habituales (NOMBRES_SUPPLIER). solo_csv y max_filas son para la web.
+    """
     if not os.path.exists(ruta):
         raise ValueError("No existe el fichero:\n  %s" % ruta)
     if os.path.isdir(ruta):
@@ -657,6 +800,8 @@ def leer_listado(ruta):
         raise ValueError("El fichero esta vacio:\n  %s" % ruta)
 
     ext = os.path.splitext(ruta)[1].lower()
+    if solo_csv and ext != ".csv":
+        raise ValueError("Solo se aceptan ficheros .csv")
     if ext in (".xlsx", ".xls", ".xlsm"):
         d = pd.read_excel(ruta, dtype=str)
     else:
@@ -686,6 +831,9 @@ def leer_listado(ruta):
 
     d.columns = [str(c).strip() for c in d.columns]
     d = d.reset_index(drop=True)
+    if max_filas is not None and len(d) > max_filas:
+        raise ValueError("El listado tiene %d productos y el maximo es %d."
+                         % (len(d), max_filas))
 
     col_url, mejor_frac = None, 0.0
     for c in d.columns:
@@ -716,10 +864,17 @@ def leer_listado(ruta):
     # Columna del proveedor. Solo se usa para armar las sentencias SQL, asi
     # que si no aparece no se aborta: simplemente no se generan.
     col_sup = None
-    for c in d.columns:
-        if c.upper().replace(" ", "_") in NOMBRES_SUPPLIER:
-            col_sup = c
-            break
+    if col_proveedor:
+        # Se compara sin distinguir mayusculas ni espacios de los lados
+        for c in d.columns:
+            if c.lower() == col_proveedor.strip().lower():
+                col_sup = c
+                break
+    else:
+        for c in d.columns:
+            if c.upper().replace(" ", "_") in NOMBRES_SUPPLIER:
+                col_sup = c
+                break
 
     d[col_url] = d[col_url].map(limpiar_url)
     return d, col_ref, col_url, col_sup
@@ -787,12 +942,45 @@ def procesar_fila(datos):
                      "motivo": "no se pudo obtener la foto: " + str(e)[:80]}
 
 
+def escribir_progreso(ruta, hechos, total, estado, mensaje=None):
+    """
+    Deja el progreso en un fichero JSON para que otro programa (la web) lo
+    lea. Se escribe en un fichero temporal y luego se renombra: asi quien lo
+    lea nunca pilla un fichero a medio escribir.
+    """
+    if not ruta:
+        return
+    tmp = ruta + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"hechos": hechos, "total": total, "estado": estado,
+                   "mensaje": mensaje}, fh, ensure_ascii=False)
+    os.replace(tmp, ruta)
+
+
+def neutralizar_formulas(hoja):
+    """
+    Evita la "inyeccion de formulas". Si una celda del listado empieza por
+    '=' (por ejemplo '=HYPERLINK(...)'), la libreria que escribe el Excel la
+    guarda como FORMULA y Excel la ejecutaria al abrir el fichero. Este
+    programa nunca escribe formulas a proposito, asi que cualquier celda que
+    haya quedado como formula se vuelve a marcar como texto: se ve tal cual
+    y no se ejecuta.
+    """
+    for fila in hoja.iter_rows():
+        for celda in fila:
+            if celda.data_type == "f":
+                celda.data_type = "s"
+
+
 # ===================================================================
 #  PROCESO DE UN LISTADO
 # ===================================================================
-def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
+def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False,
+                     col_proveedor=None, web=False, max_filas=None,
+                     progreso=None):
     entrada = os.path.abspath(entrada)
-    d, col_ref, col_url, col_sup = leer_listado(entrada)
+    d, col_ref, col_url, col_sup = leer_listado(
+        entrada, col_proveedor=col_proveedor, solo_csv=web, max_filas=max_filas)
     # Sin --sql, se hace como si no hubiera columna de proveedor: asi se
     # salta todo lo de las sentencias (columna, hojas, avisos y resumen).
     if not sql:
@@ -829,8 +1017,9 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
     rgb_hex = [""] * n
 
     # Reanudar: si ya existe la salida, se conserva lo ya resuelto
+    # (en la web no: cada trabajo empieza de cero)
     hechos = {}
-    if os.path.exists(salida):
+    if os.path.exists(salida) and not web:
         try:
             ant = pd.read_excel(salida)
             if col_ref in ant.columns and "Color" in ant.columns:
@@ -871,6 +1060,8 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
 
     t0 = time.time()
     hecho = 0
+    ultimo_aviso = 0.0
+    escribir_progreso(progreso, n - len(pendientes), n, "procesando")
     if pendientes:
         with ThreadPoolExecutor(max_workers=max(1, hilos)) as ex:
             for pos, r in ex.map(procesar_fila, pendientes):
@@ -882,6 +1073,11 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
                 t = r.get("rgb")
                 rgb_hex[pos] = ("#%02X%02X%02X" % t) if t else ""
                 hecho += 1
+                # Como mucho dos veces por segundo, para no machacar el disco
+                if progreso and time.time() - ultimo_aviso > 0.5:
+                    escribir_progreso(progreso, n - len(pendientes) + hecho,
+                                      n, "procesando")
+                    ultimo_aviso = time.time()
                 if hecho % 100 == 0 or hecho == len(pendientes):
                     seg = time.time() - t0
                     resto = (seg / hecho) * (len(pendientes) - hecho)
@@ -926,6 +1122,8 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
                 # Ensanchar la columna del SQL para que se lea sin pelearse
                 for hoja in ("SQL listo", "SQL a revisar"):
                     libro.sheets[hoja].column_dimensions["A"].width = 140
+            for hoja in libro.sheets.values():
+                neutralizar_formulas(hoja)
     except PermissionError:
         raise ValueError(
             "No puedo escribir el resultado porque el fichero esta abierto:\n"
@@ -952,6 +1150,7 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
               % len(sql_dudoso))
     print()
     print("  >>> FICHERO GENERADO: %s" % salida)
+    escribir_progreso(progreso, n, n, "terminado")
     return salida, n, n_rev, n_err
 
 
@@ -981,6 +1180,8 @@ def elegir_ficheros():
 
 
 def main():
+    # Las opciones de la linea de comandos pueden cambiar estos valores
+    global COLUMNA_SQL, COLUMNA_SQL_PROVEEDOR, COLUMNA_SQL_REFERENCIA, CACHE
     ap = argparse.ArgumentParser(
         description="Detecta el color de cada producto analizando su foto. "
                     "Todo en local: sin API ni claves.")
@@ -997,7 +1198,51 @@ def main():
     ap.add_argument("-t", "--tabla", default=TABLA_SQL,
                     help="tabla para las sentencias UPDATE, solo con --sql "
                          "(por defecto %s)" % TABLA_SQL)
+    ap.add_argument("--col-color", default=COLUMNA_SQL,
+                    help="columna de la base de datos donde va el color "
+                         "(por defecto %s)" % COLUMNA_SQL)
+    ap.add_argument("--col-proveedor", default=COLUMNA_SQL_PROVEEDOR,
+                    help="columna de la base de datos del proveedor "
+                         "(por defecto %s)" % COLUMNA_SQL_PROVEEDOR)
+    ap.add_argument("--col-referencia", default=COLUMNA_SQL_REFERENCIA,
+                    help="columna de la base de datos de la referencia "
+                         "(por defecto %s)" % COLUMNA_SQL_REFERENCIA)
+    ap.add_argument("--columna-proveedor", default=None,
+                    help="como se llama la columna del proveedor EN EL "
+                         "LISTADO, si no es SUPPLIER, PROVEEDOR, etc.")
+    ap.add_argument("--web", action="store_true",
+                    help="modo servidor web: solo .csv, bloquea direcciones "
+                         "internas y aplica limites estrictos a las fotos")
+    ap.add_argument("--max-filas", type=int, default=None,
+                    help="rechaza listados con mas productos que este numero")
+    ap.add_argument("--progreso", default=None,
+                    help="fichero .json donde ir dejando el progreso")
+    ap.add_argument("--cache", default=None,
+                    help="carpeta donde guardar las fotos descargadas")
     args = ap.parse_args()
+
+    nombres = {"--tabla": args.tabla, "--col-color": args.col_color,
+               "--col-proveedor": args.col_proveedor,
+               "--col-referencia": args.col_referencia}
+    for opcion, valor in nombres.items():
+        if not nombre_sql_valido(valor):
+            print("Nombre no valido en %s: %r" % (opcion, valor))
+            print("Solo letras, numeros y _ (y un punto para base.tabla).")
+            escribir_progreso(args.progreso, 0, 0, "error",
+                              "Nombre no valido en %s" % opcion)
+            return 2
+    COLUMNA_SQL = args.col_color
+    COLUMNA_SQL_PROVEEDOR = args.col_proveedor
+    COLUMNA_SQL_REFERENCIA = args.col_referencia
+    if args.cache:
+        CACHE = os.path.abspath(args.cache)
+    configurar_limites(args.web)
+    if args.web:
+        # En la web nunca se abre el selector de ficheros ni se procesan
+        # varios listados de golpe: un trabajo = un listado.
+        if len(args.entradas) != 1:
+            print("En modo --web hay que indicar exactamente un listado.")
+            return 2
 
     entradas = [e for e in args.entradas if e.strip()]
     if not entradas:
@@ -1024,14 +1269,22 @@ def main():
         print("=" * 68)
         try:
             procesar_listado(ruta, args.salida if len(entradas) == 1 else None,
-                             args.hilos, args.tabla, args.sql)
+                             args.hilos, args.tabla, args.sql,
+                             col_proveedor=args.columna_proveedor,
+                             web=args.web, max_filas=args.max_filas,
+                             progreso=args.progreso)
         except ValueError as e:
             fallos += 1
             print()
             print("  NO SE HA PODIDO PROCESAR")
             print("  %s" % str(e).replace("\n", "\n  "))
+            # Solo la primera linea: el resto puede llevar rutas del servidor
+            escribir_progreso(args.progreso, 0, 0, "error",
+                              str(e).split("\n")[0])
         except Exception as e:
             fallos += 1
+            escribir_progreso(args.progreso, 0, 0, "error",
+                              "Error inesperado al procesar el listado")
             print()
             print("  ERROR INESPERADO: %s: %s" % (type(e).__name__, e))
             print("  Detalle tecnico:")
