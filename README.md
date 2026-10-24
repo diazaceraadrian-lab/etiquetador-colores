@@ -37,8 +37,8 @@ beige con marrón, gris con negro, rosa con morado.
 | `RGB` | El color medido, en formato `#RRGGBB` |
 
 Solo hace falta revisar a mano las filas con `Revisar = SI` (normalmente entre
-el 8 % y el 17 %). Si el listado trae la columna del proveedor, además genera
-las sentencias SQL `UPDATE` listas para cargar los colores en la base de datos.
+el 8 % y el 17 %). Opcionalmente, también genera las sentencias SQL `UPDATE`
+listas para cargar los colores en la base de datos.
 
 ## Cómo funciona por dentro
 
@@ -73,12 +73,18 @@ Opciones:
 |---|---|
 | `-s`, `--salida` | Nombre del Excel de salida (si procesas un solo listado) |
 | `-w`, `--hilos` | Descargas en paralelo (por defecto 8) |
+| `--sql` | Genera también las sentencias SQL (ver abajo) |
 | `-t`, `--tabla` | Tabla para las sentencias SQL (por defecto, la variable de entorno `ETIQUETADOR_TABLA` o `productos`) |
 
-### Sentencias SQL
+### Sentencias SQL (opcional)
 
-Si el listado trae una columna de proveedor, el Excel incluye dos hojas con
+Están desactivadas por defecto. Si lanzas el programa con `--sql` y el listado
+trae una columna de proveedor, el Excel añade una columna `SQL` y dos hojas con
 sentencias `UPDATE` (las de color fiable y las que conviene revisar antes):
+
+```bash
+python etiquetar_colores_local.py mis_productos.csv --sql
+```
 
 ```sql
 update productos set color = 'Navy blue' where proveedor_id = 7 and referencia = 'AB123';

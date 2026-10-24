@@ -586,6 +586,7 @@ NOMBRES_SUPPLIER = ("SUPPLIER_ID", "SUPPLIERID", "SUPPLIER", "PROVEEDOR",
 COLUMNAS_NUEVAS = ["Color", "Familia", "Confianza", "Revisar", "Motivo", "RGB"]
 
 # ---- Sentencias SQL que se generan en el Excel -------------------------
+# Son opcionales: solo se generan si se lanza con  --sql
 # Los nombres reales de tu base de datos NO van escritos aqui: se leen de
 # variables de entorno. Configuralas una sola vez en una terminal (y abre
 # una terminal nueva despues), solo las que sean distintas del valor por
@@ -789,9 +790,13 @@ def procesar_fila(datos):
 # ===================================================================
 #  PROCESO DE UN LISTADO
 # ===================================================================
-def procesar_listado(entrada, salida=None, hilos=8, tabla=None):
+def procesar_listado(entrada, salida=None, hilos=8, tabla=None, sql=False):
     entrada = os.path.abspath(entrada)
     d, col_ref, col_url, col_sup = leer_listado(entrada)
+    # Sin --sql, se hace como si no hubiera columna de proveedor: asi se
+    # salta todo lo de las sentencias (columna, hojas, avisos y resumen).
+    if not sql:
+        col_sup = None
     n = len(d)
     if salida is None:
         salida = os.path.join(
@@ -802,9 +807,12 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None):
     print("  Entrada    : %s" % entrada)
     print("  Salida     : %s" % salida)
     print("  Productos  : %d" % n)
-    print("  Detectado  : referencia='%s'   fotos='%s'   proveedor='%s'"
-          % (col_ref, col_url, col_sup if col_sup else "no encontrada"))
-    if col_sup is None:
+    if sql:
+        print("  Detectado  : referencia='%s'   fotos='%s'   proveedor='%s'"
+              % (col_ref, col_url, col_sup if col_sup else "no encontrada"))
+    else:
+        print("  Detectado  : referencia='%s'   fotos='%s'" % (col_ref, col_url))
+    if sql and col_sup is None:
         print("  Aviso      : sin columna de proveedor no se pueden generar")
         print("               las sentencias SQL. El resto funciona igual.")
 
@@ -905,18 +913,19 @@ def procesar_listado(entrada, salida=None, hilos=8, tabla=None):
                                  tabla)
             sql_col[pos] = s
             (sql_dudoso if revisar[pos] == "SI" else sql_listo).append(s)
-    d["SQL"] = sql_col
+        d["SQL"] = sql_col
 
     try:
         with pd.ExcelWriter(salida, engine="openpyxl") as libro:
             d.to_excel(libro, sheet_name="Productos", index=False)
-            pd.DataFrame({"-- sentencias listas para ejecutar": sql_listo}) \
-                .to_excel(libro, sheet_name="SQL listo", index=False)
-            pd.DataFrame({"-- revisar el color antes de ejecutar": sql_dudoso}) \
-                .to_excel(libro, sheet_name="SQL a revisar", index=False)
-            # Ensanchar la columna del SQL para que se lea sin pelearse
-            for hoja in ("SQL listo", "SQL a revisar"):
-                libro.sheets[hoja].column_dimensions["A"].width = 140
+            if col_sup is not None:
+                pd.DataFrame({"-- sentencias listas para ejecutar": sql_listo}) \
+                    .to_excel(libro, sheet_name="SQL listo", index=False)
+                pd.DataFrame({"-- revisar el color antes de ejecutar": sql_dudoso}) \
+                    .to_excel(libro, sheet_name="SQL a revisar", index=False)
+                # Ensanchar la columna del SQL para que se lea sin pelearse
+                for hoja in ("SQL listo", "SQL a revisar"):
+                    libro.sheets[hoja].column_dimensions["A"].width = 140
     except PermissionError:
         raise ValueError(
             "No puedo escribir el resultado porque el fichero esta abierto:\n"
@@ -982,9 +991,12 @@ def main():
                     help="fichero .xlsx de salida (solo si procesas UN listado)")
     ap.add_argument("-w", "--hilos", type=int, default=8,
                     help="descargas en paralelo (por defecto 8)")
+    ap.add_argument("--sql", action="store_true",
+                    help="genera tambien las sentencias SQL UPDATE (hace falta "
+                         "una columna de proveedor en el listado)")
     ap.add_argument("-t", "--tabla", default=TABLA_SQL,
-                    help="tabla para las sentencias UPDATE (por defecto %s)"
-                         % TABLA_SQL)
+                    help="tabla para las sentencias UPDATE, solo con --sql "
+                         "(por defecto %s)" % TABLA_SQL)
     args = ap.parse_args()
 
     entradas = [e for e in args.entradas if e.strip()]
@@ -1012,7 +1024,7 @@ def main():
         print("=" * 68)
         try:
             procesar_listado(ruta, args.salida if len(entradas) == 1 else None,
-                             args.hilos, args.tabla)
+                             args.hilos, args.tabla, args.sql)
         except ValueError as e:
             fallos += 1
             print()
