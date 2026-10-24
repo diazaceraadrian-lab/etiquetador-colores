@@ -808,11 +808,21 @@ def leer_listado(ruta, col_proveedor=None, solo_csv=False, max_filas=None):
         mejor = None
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             for sep in (";", ",", "\t", "|"):
+                # Las filas con mas columnas que la cabecera (un texto con
+                # el separador dentro y sin comillas) no se pueden leer. Se
+                # saltan, pero se CUENTAN para avisar: antes desaparecian
+                # del resultado sin que nadie se enterara.
+                # index_col=False es imprescindible: sin el, si una fila trae
+                # columnas de mas, pandas "adivina" que la primera columna es
+                # un indice y DESPLAZA los datos de todas las filas.
+                malas = []
                 try:
                     p = pd.read_csv(ruta, sep=sep, encoding=enc, dtype=str,
-                                    engine="python", on_bad_lines="skip")
+                                    engine="python", index_col=False,
+                                    on_bad_lines=lambda f: malas.append(f))
                 except Exception:
                     continue
+                p.attrs["filas_malas"] = len(malas)
                 if p.shape[1] < 2:
                     continue
                 # Gana la combinacion con mas columnas y con alguna que
@@ -828,6 +838,15 @@ def leer_listado(ruta, col_proveedor=None, solo_csv=False, max_filas=None):
                 "No consigo interpretar el fichero como tabla.\n"
                 "  Comprueba que sea un .csv o un .xlsx de verdad.")
         d = mejor[1]
+        malas = d.attrs.get("filas_malas", 0)
+        if malas:
+            aviso = ("%d fila(s) tienen mas columnas que la cabecera y no se "
+                     "pueden leer. Si algun texto lleva el separador dentro, "
+                     "ponlo entre comillas." % malas)
+            if solo_csv:
+                # En la web no se entrega un resultado incompleto
+                raise ValueError(aviso)
+            print("  Aviso      : " + aviso + " Se saltan.")
 
     d.columns = [str(c).strip() for c in d.columns]
     d = d.reset_index(drop=True)

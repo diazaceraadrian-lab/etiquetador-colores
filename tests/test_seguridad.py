@@ -207,6 +207,26 @@ def test_web_solo_acepta_csv(tmp_path):
         et.leer_listado(str(ruta), solo_csv=True)
 
 
+def _csv_con_fila_mala(tmp_path):
+    ruta = tmp_path / "listado.csv"
+    ruta.write_text("referencia;imagen\n"
+                    "A1;http://x.example/1.jpg\n"
+                    "A2;Camisa; azul;http://x.example/2.jpg\n"   # columna de mas
+                    "A3;http://x.example/3.jpg\n", encoding="utf-8")
+    return str(ruta)
+
+
+def test_web_rechaza_filas_mal_formadas(tmp_path):
+    with pytest.raises(ValueError, match="1 fila"):
+        et.leer_listado(_csv_con_fila_mala(tmp_path), solo_csv=True)
+
+
+def test_escritorio_avisa_de_filas_mal_formadas(tmp_path, capsys):
+    d = et.leer_listado(_csv_con_fila_mala(tmp_path))[0]
+    assert len(d) == 2                                 # A1 y A3
+    assert "1 fila(s)" in capsys.readouterr().out      # y lo dice
+
+
 def test_columna_proveedor_con_otro_nombre(tmp_path):
     ruta = _csv(tmp_path, 3)
     # 'marca' no es un nombre conocido: sin la opcion no se detecta...
